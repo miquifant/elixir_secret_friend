@@ -741,3 +741,71 @@ A:
 
 Porque loop ahora solo tiene un argumento, que es una tupla
 ```
+En este punto hago el commit 2.
+Los siguientes irán al commit 3.
+
+El último cambio es meter el GenServer.
+
+La lógica del loop es genérica.
+```
+def loop({_sflist, _selection} = state) do
+    receive do
+      {:cast, msg} ->
+        {:noreply, new_state} = handle_cast(msg, state)
+        loop(new_state)
+      {:call, from, msg} ->
+        {:reply, response, new_state} = handle_call(msg, from, state)
+        send(from, {:response, response})
+        loop(new_state)
+    end
+  end
+```
+- Me calzo ese bucle y hago use GenServer (es como "extender" o hacer mixing de GenServer. Me traigo su código y lo amplio)
+- A start lo llamaremos start_link
+- En vez de hacer el spawn haremos un GenServer start_link
+- Ya no nos referimos a las listas por su pid sino que le vamos a dar un nombre
+```
+Cambio:
+  def start() do
+    spawn(__MODULE__, :loop, [{SFList.new(), nil}])
+  end
+  def loop ...
+
+Por:
+  def start_link(name) do
+                                   # << state inicial <<
+    GenServer.start_link(__MODULE__, {SFList.new(), nil}, name: name)
+  end
+```
+Y podemos añadir una anotación a las funciones handle_call y handle_cast 
+para que quede claro que estamos sobreescribiendo funciones de genServer
+```
+@impl GenServer
+```
+Podemos añadir también una implementación del init de GenServer
+Ejemplo sencillo:
+```
+@impl GenServer
+def init(state) do
+  {:ok, state}
+end
+```
+Eso sería la parte del server. La del API:
+- llamo a start_link en vez de start, pasándole el nombre
+- cambio los pids por names
+- quito el handle_rsponse que ya no lo hago yo
+- quito los sends y hago llamadas a GenServer (que ya no pasan ni self() ni :cast / :call)
+- cambio el uso en el .ies.ex
+```
+alias SecretFriend.API.SFList
+alias SecretFriend.Worker.SFWorker
+
+SFList.new(:lista1)
+|> SFList.add_friend("Ramón")
+|> SFList.add_friend("Javi")
+|> SFList.add_friend("Miqui")
+
+IO.puts("Loaded!! La lista es:")
+IO.inspect(SFList.show(:lista1))
+
+```
