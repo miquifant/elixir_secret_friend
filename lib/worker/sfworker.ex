@@ -2,69 +2,37 @@ defmodule SecretFriend.Worker.SFWorker do
   alias SecretFriend.Core.SFList
 
   def start() do
-    spawn(SecretFriend.Worker.SFWorker, :loop, [SFList.new(), nil])
+    spawn(__MODULE__, :loop, [{SFList.new(), nil}])
   end
 
-  def loop(sflist, selection) do
+  def loop({_sflist, _selection} = state) do
     receive do
-      {:add_friend, friend} ->
-        sflist = SFList.add_friend(sflist, friend)
-        loop(sflist, nil)
-
-      {:create_selection, from} ->
-        case selection do
-          nil ->
-            new_selection = SFList.create_selection(sflist)
-            send(from, {:reply_create_selection, new_selection})
-            loop(sflist, new_selection)
-
-          existing_selection ->
-            send(from, {:reply_create_selection, existing_selection})
-            loop(sflist, existing_selection)
-        end
-
-      {:show, from} ->
-        send(from, {:reply_show, sflist})
-        loop(sflist, selection)
-
-      :end ->
-        nil
+      {:cast, msg} ->
+        {:noreply, new_state} = handle_cast(msg, state)
+        loop(new_state)
+      {:call, from, msg} ->
+        {:reply, response, new_state} = handle_call(msg, from, state)
+        send(from, {:response, response})
+        loop(new_state)
     end
   end
 
-  def add_friend(pid, friend) do
-    send(pid, {:add_friend, friend})
+  def handle_cast({:add_friend, friend}, {sflist, _selection} = _state) do
+    new_sflist = SFList.add_friend(sflist, friend)
+    {:noreply, {new_sflist, nil}}
   end
 
-  def create_selection(pid) do
-    send(pid, {:create_selection, self()})
-    receive do
-      {:reply_create_selection, selection} ->
-        selection
-      _other -> nil
-    end
+  def handle_call(:create_selection, _from, {sflist, nil} = _state) do
+    new_selection = SFList.create_selection(sflist)
+    {:reply, new_selection, {sflist, new_selection}}
   end
 
-  def show(pid) do
-    alive = Process.alive?(pid)
-    case alive do
-      true ->
-        send(pid, {:show, self()})
-        receive do
-          {:reply_show, sflist} ->
-            sflist
-          _other ->
-            nil
-        end
-      _other -> nil
-    end
+  def handle_call(:create_selection, _from, {_sflist, selection} = state) do
+    {:reply, selection, state}
   end
 
-  def exit(pid) do
-    case Process.alive?(pid) do
-      true ->
-        Process.exit(pid, "Mas matao")
-      _other -> nil
-    end
+  def handle_call(:show, _from, {sflist, _selection} = state) do
+    {:reply, sflist, state}
   end
+
 end

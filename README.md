@@ -305,8 +305,8 @@ defmodule SecretFriend.Worker.SFWorker do
   end
 end
 ```
-- a las funciones como add_friend, que no esperan nada las llamaremos después `cast`
-- y a las que sí esperan algo las llamaremos `call`.
+- a las funciones como add_friend, que no esperan nada las llamaremos después `cast` (mensaje que no espera respuesta)
+- y a las que sí esperan algo las llamaremos `call` (mensaje que espera respuesta).
 
 Ahora lo uso sin hacer sends sino llamando a su API:
 ```
@@ -410,4 +410,334 @@ Si te fijas, la función se parece mucho a una función con distintos pattern-ma
     end
   end
 ```
-Lo primero que vamos a hacer es separar el API
+Lo primero que vamos a hacer es separar el API.
+(Ver commit 2)
+Creamos el paquete API y dentro un módulo a la que nos llevamos las funciones del API.
+
+Hay que cambiar el iex para que importe el de API, no el de Core, y haga new() no start().
+
+Y cambio el spawn para que ponga __MODULE__ que hace referencia al propio módulo.
+
+**api/sflist.ex**
+```
+defmodule SecretFriend.API.SFList do
+  alias SecretFriend.Worker.SFWorker
+
+  def new(), do: SFWorker.start()
+
+  def add_friend(pid, friend) do
+    send(pid, {:add_friend, friend})
+  end
+
+  def create_selection(pid) do
+    send(pid, {:create_selection, self()})
+    receive do
+      {:reply_create_selection, selection} ->
+        selection
+      _other -> nil
+    end
+  end
+
+  def show(pid) do
+    alive = Process.alive?(pid)
+    case alive do
+      true ->
+        send(pid, {:show, self()})
+        receive do
+          {:reply_show, sflist} ->
+            sflist
+          _other ->
+            nil
+        end
+      _other -> nil
+    end
+  end
+
+  def exit(pid) do
+    case Process.alive?(pid) do
+      true ->
+        Process.exit(pid, "Mas matao")
+      _other -> nil
+    end
+  end
+end
+```
+.iex.exs
+```
+alias SecretFriend.API.SFList
+alias SecretFriend.Worker.SFWorker
+
+sflist = SFList.new()
+SFList.add_friend(sflist, "Ramón")
+SFList.add_friend(sflist, "Javi")
+SFList.add_friend(sflist, "Miqui")
+
+IO.puts("Loaded!! La lista es:")
+IO.inspect(sflist)
+```
+
+Ahora además le vamos a cambiar la función add_friend para que devuelva el PID y así poder concatenar.
+```
+  def add_friend(pid, friend) do
+    send(pid, {:add_friend, friend})
+    pid
+  end
+```
+el .iex.ex quedaría:
+```
+alias SecretFriend.API.SFList
+alias SecretFriend.Worker.SFWorker
+
+sflist =
+  SFList.new()
+  |> SFList.add_friend("Ramón")
+  |> SFList.add_friend("Javi")
+  |> SFList.add_friend("Miqui")
+
+IO.puts("Loaded!! La lista es:")
+IO.inspect(sflist)
+```
+---
+analizamos el loop:
+- parece que tuviéramos tres funciones diferentes.
+- dos tipos distintas.
+  - las que cambian estado
+  - las que cambian estado y responden al llamante
+
+Hacemos una función handle_cast para las que no responden
+y una handle_call para las otras.
+
+En las calls saco el from del mensaje, a un segundo param.
+Y el estado, que estábamos cambiando en las funciones, tenemos que recibirlo como param.
+El estado lo modelamos como una tupla {sflist, selection}
+y a esa tupla la llamamos tambien state.
+```
+{sflist, selection} = state
+```
+Los que no vayamos a usar le podemos poner guión bajo.
+Pero dejamos todos los handlers como:
+```
+handle_cast(msg, state)
+handle_call(msg, from, state)
+```
+Algo tipo:
+```
+  def loop(sflist, selection) do
+    receive do
+    end
+  end
+
+  def handle_cast({:add_friend, friend}, {sflist, _selection} = _state) do
+    sflist = SFList.add_friend(sflist, friend)
+    loop(sflist, nil)
+  end
+
+  def handle_call(:create_selection, from, {sflist, selection} = _state) do
+    case selection do
+      nil ->
+        new_selection = SFList.create_selection(sflist)
+        send(from, {:reply_create_selection, new_selection})
+        loop(sflist, new_selection)
+
+      existing_selection ->
+        send(from, {:reply_create_selection, existing_selection})
+        loop(sflist, existing_selection)
+    end
+
+    def handle_call(:show, from, {sflist, selection} = _state) do
+      send(from, {:reply_show, sflist})
+      loop(sflist, selection)
+    end
+  end
+```
+Mis funciones cast cogen el estado, lo manipulan y devuelven el nuevo estado:
+"noreply" y el nuevo estado.
+```
+  def handle_cast({:add_friend, friend}, {sflist, _selection} = _state) do
+    new_sflist = SFList.add_friend(sflist, friend)
+    loop(new_sflist, nil)
+  end
+```
+Lo cambiamos para devolverlo en tupla parecido a la entrada
+```
+{:noreply, {new_sflist, new_selection}}
+
+handle_cast(msg, state) -> {:noreply, new_state}
+```
+Las funciones call, también nos calzamos la llamada al loop, e incluso el send.
+Aqui el retorno es "reply", lo que hay que responder, y el nuevo estado.
+```
+{:reply, response, {new_sflist, new_selection}}
+
+handle_call(msg, from, state) -> {:reply, response, new_state}
+```
+quedaría:
+```
+  def handle_call(:create_selection, _from, {sflist, selection} = _state) do
+    case selection do
+      nil ->
+        new_selection = SFList.create_selection(sflist)
+        {:reply, new_selection, {sflist, new_selection}}
+
+      existing_selection ->
+        {:reply, existing_selection, {sflist, existing_selection}}
+    end
+  end
+```
+O mejor, cuando el estado no haya cambiado, usamos state.
+```
+  def handle_call(:create_selection, _from, {sflist, selection} = state) do
+    case selection do
+      nil ->
+        new_selection = SFList.create_selection(sflist)
+        {:reply, new_selection, {sflist, new_selection}}
+
+      existing_selection ->
+        {:reply, existing_selection, state}
+    end
+  end
+```
+Así se ve que la segunda rama NO CAMBIA el estado.
+En el último caso es donde mejor se ve qué hace:
+```
+  def handle_call(:show, _from, {sflist, _selection} = state) do
+    {:reply, sflist, state}
+  end
+```
+Solo lee la lista, la selección no, y devuelve state, o sea, que no altera el estado.
+---
+Ahora mira que handle_call(:create_selection,...) está haciendo pattern matching.
+La podemos dividir en dos funciones.
+```
+  def handle_call(:create_selection, _from, {sflist, nil} = _state) do
+    new_selection = SFList.create_selection(sflist)
+    {:reply, new_selection, {sflist, new_selection}}
+  end
+
+  def handle_call(:create_selection, _from, {_sflist, selection} = state) do
+    {:reply, selection, state}
+  end
+```
+Ahora solo hay que integrar esto en el loop.
+Decimos que puede recibir casts y calls.
+- cast msg
+- call from msg
+```
+  def loop({_sflist, _selection} = state) do
+    receive do
+      {:cast, msg} ->
+        handle_cast(msg, state)
+      {:call, from, msg} ->
+        handle_call(msg, from, state)
+    end
+  end
+```
+Ahí tenemos la llamada, nos falta la respuesta.
+```
+  def loop({_sflist, _selection} = state) do
+    receive do
+      {:cast, msg} ->
+        {:noreply, new_state} = handle_cast(msg, state)
+        loop(new_state)
+      {:call, from, msg} ->
+        {:reply, response, new_state} = handle_call(msg, from, state)
+        send(from, response)
+        loop(new_state)
+    end
+  end
+```
+
+Con esto, la parte del servicio está, ahora hay que cambiar el API.
+```
+# Cambio
+  def add_friend(pid, friend) do
+    send(pid, {:add_friend, friend})
+    pid
+  end
+  def create_selection(pid) do
+    send(pid, {:create_selection, self()})
+    receive do
+      {:reply_create_selection, selection} ->
+        selection
+      _other -> nil
+    end
+  end
+# por
+  def add_friend(pid, friend) do
+    send(pid, {:cast, {:add_friend, friend}})
+    pid
+  end
+
+  def create_selection(pid) do
+    send(pid, {:call, self(), :create_selection})
+    receive do
+      {:response, selection} ->
+        selection
+      _other -> nil
+    end
+  end
+```
+Y ahora vemos que los receives están duplicados, porque siempre recibo {:response, response}}
+```
+def create_selection(pid) do
+    send(pid, {:call, self(), :create_selection})
+    receive do
+      {:response, selection} ->
+        selection
+      _other -> nil
+    end
+  end
+
+  def show(pid) do
+    alive = Process.alive?(pid)
+    case alive do
+      true ->
+        send(pid, {:call, self(), :show})
+        receive do
+          {:response, sflist} ->
+            sflist
+          _other ->
+            nil
+        end
+      _other -> nil
+    end
+  end
+```
+Así que lo cambio por:
+```
+  def create_selection(pid) do
+    send(pid, {:call, self(), :create_selection})
+    handle_response()
+  end
+
+  def show(pid) do
+    alive = Process.alive?(pid)
+    case alive do
+      true ->
+        send(pid, {:call, self(), :show})
+        handle_response()
+      _other -> nil
+    end
+  end
+
+  defp handle_response() do
+    receive do
+      {:response, response} -> response
+      _other -> nil
+    end
+  end
+```
+Y hay que cambiar el arranque:
+```
+De:
+  def start() do
+    spawn(__MODULE__, :loop, [SFList.new(), nil])
+  end
+
+A:
+  def start() do
+    spawn(__MODULE__, :loop, [{SFList.new(), nil}])
+  end
+
+Porque loop ahora solo tiene un argumento, que es una tupla
+```

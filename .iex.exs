@@ -1,4 +1,4 @@
-alias SecretFriend.Core.SFList
+alias SecretFriend.API.SFList
 alias SecretFriend.Worker.SFWorker
 
 sflist =
@@ -8,4 +8,4 @@ sflist =
   |> SFList.add_friend("Miqui")
 
 IO.puts("Loaded!! La lista es:")
-IO.inspect(sflist)
+IO.inspect(SFList.show(sflist))
