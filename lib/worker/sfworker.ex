@@ -13,9 +13,8 @@ defmodule SecretFriend.Worker.SFWorker do
   end
 
   @impl GenServer
-  def handle_cast({:add_friend, friend}, %{sflist: sflist} = state) do
-    new_sflist = SFList.add_friend(sflist, friend)
-    {:noreply, %{state | sflist: new_sflist, selection: nil}}
+  def handle_cast(:lock, state) do
+    {:noreply, %{state | lock: true}}
   end
 
   @impl GenServer
@@ -34,4 +33,19 @@ defmodule SecretFriend.Worker.SFWorker do
     {:reply, sflist, state}
   end
 
+  @impl GenServer
+  def handle_call(:lock?, _from, %{lock: lock} = state) do
+    {:reply, lock, state}
+  end
+
+  @impl GenServer
+  def handle_call({:add_friend, friend}, _from, %{sflist: sflist, lock: false} = state) do
+    new_sflist = SFList.add_friend(sflist, friend)
+    {:reply, :ok, %{state | sflist: new_sflist, selection: nil}}
+  end
+
+  @impl GenServer
+  def handle_call({:add_friend, _friend}, _from, %{lock: true} = state) do
+    {:reply, :locked, state}
+  end
 end

@@ -856,3 +856,159 @@ Tras el refactor, debe seguir funcionando:
 iex(1)> SFList.create_selection(:lista1)
 [["Javi", "Ramón"], ["Ramón", "Miqui"], ["Miqui", "Javi"]]
 ```
+Ahora ya podemos implementar la funcionalidad de `lock`
+Añadir al API una función lock? que devuelva si está bloqueada la lista.
+Cambiar en el servidor para que me devuelva el valor.
+```
+# API
+  def lock?(name) do
+    GenServer.call(name, :lock?)
+  end
+
+# GenServer
+  @impl GenServer
+  def handle_call(:lock?, _from, %{lock: lock} = state) do
+    {:reply, lock, state}
+  end
+
+# call
+iex(1)> SFList.lock?(:lista1)      
+false
+```
+Y ahora podríamos hacer la función de bloqueo de lista.
+- Primero implementar el mensaje imperativo lock,
+- y después tocar add_friend para que no añada a listas locked
+Recordar que los handle_cast deben estar juntos todos, y los handle_call.
+Y recordar que el orden en que se ponen las funciones importa.
+
+Implementamos el lock:
+```
+#api
+  def lock(name) do
+    GenServer.cast(name, :lock)
+  end
+
+# worker
+  @impl GenServer
+  def handle_cast(:lock, state) do
+    {:noreply, %{state | lock: true}}
+  end
+
+iex(1)> SFList.lock?(:lista1)
+false
+iex(2)> SFList.lock(:lista1) 
+:ok
+iex(3)> SFList.lock?(:lista1)
+true
+```
+Modificamos el add_friend:
+Si le ponemos en el pattern matching que el state incluya %{sflist: sflist, lock: false} = state
+hacemos que add_friend solo funcione si no está bloqueada.
+Pero tendríamos que cambiar el cast por call para responder que no se puede o si se hizo.
+En este punto se piña, porque no tendríamos implementado cuando lock es false (no hay un handle_cast que maneje ese estado)
+```
+iex(1)> SFList.lock?(:lista1)
+false
+iex(2)> SFList.lock(:lista1) 
+:ok
+iex(3)> SFList.add_friend(:lista1, :manolooo)
+:lista1
+iex(4)> 
+08:30:43.310 [error] GenServer :lista1 terminating
+** (FunctionClauseError) no function clause matching in SecretFriend.Worker.SFWorker.handle_cast/2
+    (elixir_secret_friend 0.1.0) lib/worker/sfworker.ex:16: SecretFriend.Worker.SFWorker.handle_cast({:add_friend, :manolooo}, %{lock: true, selection: nil, sflist: ["Miqui", "Javi", "Ramón"]})
+    (stdlib 3.16.1) gen_server.erl:695: :gen_server.try_dispatch/4
+    (stdlib 3.16.1) gen_server.erl:771: :gen_server.handle_msg/6
+    (stdlib 3.16.1) proc_lib.erl:226: :proc_lib.init_p_do_apply/3
+Last message: {:"$gen_cast", {:add_friend, :manolooo}}
+State: %{lock: true, selection: nil, sflist: ["Miqui", "Javi", "Ramón"]}
+** (EXIT from #PID<0.159.0>) shell process exited with reason: an exception was raised:
+    ** (FunctionClauseError) no function clause matching in SecretFriend.Worker.SFWorker.handle_cast/2
+        (elixir_secret_friend 0.1.0) lib/worker/sfworker.ex:16: SecretFriend.Worker.SFWorker.handle_cast({:add_friend, :manolooo}, %{lock: true, selection: nil, sflist: ["Miqui", "Javi", "Ramón"]})
+        (stdlib 3.16.1) gen_server.erl:695: :gen_server.try_dispatch/4
+        (stdlib 3.16.1) gen_server.erl:771: :gen_server.handle_msg/6
+        (stdlib 3.16.1) proc_lib.erl:226: :proc_lib.init_p_do_apply/3
+```
+Hay que hacer una versión cuando el lock es true, aunque no haga nada.
+```
+  @impl GenServer
+  def handle_cast({:add_friend, friend}, %{sflist: sflist, lock: false} = state) do
+    new_sflist = SFList.add_friend(sflist, friend)
+    {:noreply, %{state | sflist: new_sflist, selection: nil}}
+  end
+
+  @impl GenServer
+  def handle_cast({:add_friend, _friend}, %{lock: true} = state) do
+    {:noreply, state}
+  end
+
+  # Que, por pattern matching, no haría falta que dijera que lock: true, ya que es el único caso que queda. Solo que es menos claro al leerlo y tiene que estar la segunda, pero las dos valen
+  @impl GenServer
+  def handle_cast({:add_friend, _friend}, state) do
+    {:noreply, state}
+  end
+```
+Vemos que ya no hace nada el add_friend en listas bloqueadas:
+```
+iex(1)> SFList.show(:lista1)
+["Miqui", "Javi", "Ramón"]
+iex(2)> SFList.lock?(:lista1)
+false
+iex(3)> SFList.lock(:lista1) 
+:ok
+iex(4)> SFList.add_friend(:lista1, :manoloooo) |> SFList.show()
+["Miqui", "Javi", "Ramón"]
+```
+Ahora cambiamos el cast a call para devolver el error, y cambio el API para que haga
+`:ok -> name`
+`:locked -> :locked`
+o mejor:
+```
+  def add_friend(name, friend) do
+    case GenServer.call(name, {:add_friend, friend}) do
+      :ok -> {:ok, name}
+      :locked -> {:error, :locked}
+    end
+  end
+```
+El servicio queda:
+```
+TO DO
+```
+
+--
+
+# Supervisor
+Y si el servicio revienta? 
+Un supervisor se encargará de re-arrancar o hacer lo que yo le diga con el proceso.
+
+Para ellos vamos a dejar de trabajar con iex y definir una aplicación.
+
+Cuando creamos el proyecto hicimos mix new y le dimos un nombre.
+Si le pongo la opción --sup me crea un fichero application.ex
+Es una aplicación OTP.
+```
+defmodule XXXXX.Application do
+  @moduledoc false
+
+  use Application
+
+  @impl true
+  def start(_type, _args) do
+    children = [
+      # Starts a worker by calling: XXXXX.Worker.start_link(arg)
+      # {XXXXX.Worker, arg}
+    ]
+
+    # See https://hexdocs.pm/elixir/Supervisor.html
+    # for other strategies and supported options
+    opts = [strategy: :one_for_one, name: XXXXX.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+
+```
+children es todas las cosas que quiero que se arranquen cuando arranco la aplicación.
+`{modulo, args}` --> llamará al start_link de ese módulo pasándole esos argumentos.
+Este es el supervisor "padre".
+
