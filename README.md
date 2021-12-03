@@ -1011,4 +1011,161 @@ end
 children es todas las cosas que quiero que se arranquen cuando arranco la aplicación.
 `{modulo, args}` --> llamará al start_link de ese módulo pasándole esos argumentos.
 Este es el supervisor "padre".
+Ejemplo:
+```
+defmodule SecretFriend do
+  use Application
 
+  @impl Application
+  def start(_type, _args) do
+    children = [
+      {SecretFriend.Worker.SFWorker, :supervised}
+      # puede haber varios children pero no del mismo tipo.
+      # lo podrá hacer con un dynamic supervisor
+    ]
+    ...
+  end
+end
+```
+Y a continuación lo arrancamos diciendo la estrategia de rearranque:
+- one_for_one: si muere uno se rearranca solo él
+- one_for_all: si muere uno se rearranca él y todos los que están tras él en la lista
+```
+  @impl Application
+  def start(_type, _args) do
+    children = [
+      {SecretFriend.Worker.SFWorker, :supervised}
+    ]
+    opts = [strategy: :one_for_one, name: SecretFriend.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+```
+En el proyecto con --sup añadió tb:
+```
+# Run "mix help compile.app" to learn about applications.
+  def application do
+    [
+      extra_applications: [:logger],
+      mod: {XXXX.Application, []}
+    ]
+  end
+```
+Lo añadimos:
+```
+  def application do
+    [
+      mod: {SecretFriend, []},
+      extra_applications: [:logger]
+    ]
+  end
+```
+Aqui, SecretFriend es mi aplicación (el módulo que hemos convertido en aplicación).
+Este proyecto solo levantaría esa aplicación, pero podría levantar las que quisiera.
+```
+iex(1)> Supervisor.which_children(SecretFriend.Supervisor)
+[
+  {SecretFriend.Worker.SFWorker, #PID<0.147.0>, :worker,
+   [SecretFriend.Worker.SFWorker]}
+]
+```
+Interactúo con el proceso:
+```
+iex(2)> SFList.show(:supervised)
+[]
+iex(3)> SFList.add_friend(:supervised, :pepe)
+:supervised
+iex(4)> SFList.show(:supervised)             
+[:pepe]
+iex(5)> 
+```
+Si me calzo el :lista1 se lleva la consola por delante
+```
+iex(6)> Process.whereis(:lista1)
+#PID<0.149.0>
+iex(7)> |> Process.exit(:boom)
+** (EXIT from #PID<0.148.0>) shell process exited with reason: :boom
+
+Interactive Elixir (1.12.3) - press Ctrl+C to exit (type h() ENTER for help)
+Loaded!! La lista es:
+["Miqui", "Javi", "Ramón"]
+iex(1)> 
+```
+Si me calzo el supervised no, pero se rearranca:
+```
+iex(1)> Process.whereis(:supervised)
+#PID<0.147.0>
+iex(2)> |> Process.exit(:boom)      
+true
+```
+Lo único malo es que pierdo el estado, pero sigo pudiendo trabajar con el proceso.
+```
+iex(3)> SFList.add_friend(:supervised, :pepe)
+:supervised
+iex(4)> SFList.show(:supervised)             
+[:pepe]
+iex(5)> Process.whereis(:supervised)         
+#PID<0.161.0>
+iex(6)> |> Process.exit(:boom)               
+true
+iex(7)> SFList.show(:supervised)             
+[]
+```
+Si quiero mantener el estado lo metemos en algún sitio.
+En la VM erlang y la lib stand existen dos bbdd:
+- una clave valor
+- una no-sql con tablas y campos consultables
+
+La clave valor es `ets`. Es de Erlang.
+Se usa con `:ets.`
+Lo vemos en la prox sesión.
+
+Vamos a crear un ejecutable de la aplicación con `mix release`
+```
+$ mix release
+* assembling elixir_secret_friend-0.1.0 on MIX_ENV=dev
+* skipping runtime configuration (config/runtime.exs not found)
+* skipping elixir.bat for windows (bin/elixir.bat not found in the Elixir installation)
+* skipping iex.bat for windows (bin/iex.bat not found in the Elixir installation)
+
+Release created at _build/dev/rel/elixir_secret_friend!
+
+    # To start your system
+    _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend start
+
+Once the release is running:
+
+    # To connect to it remotely
+    _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend remote
+
+    # To stop it gracefully (you may also send SIGINT/SIGTERM)
+    _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend stop
+
+To list all commands:
+
+    _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend
+```
+Se puede ejecutar en cualquier máquina con el mismo OS, aunque no tenga erlang.
+```
+$ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend
+Usage: elixir_secret_friend COMMAND [ARGS]
+
+The known commands are:
+
+    start          Starts the system
+    start_iex      Starts the system with IEx attached
+    daemon         Starts the system as a daemon
+    daemon_iex     Starts the system as a daemon with IEx attached
+    eval "EXPR"    Executes the given expression on a new, non-booted system
+    rpc "EXPR"     Executes the given expression remotely on the running system
+    remote         Connects to the running system via a remote shell
+    restart        Restarts the running system via a remote command
+    stop           Stops the running system via a remote command
+    pid            Prints the operating system PID of the running system via a remote command
+    version        Prints the release name and version to be booted
+
+$ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend daemon
+$ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend rpc 'IO.inspect 1 + 2'
+3
+$ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend rpc 'IO.inspect SecretFriend.API.SFList.show(:supervised)'
+[]
+```
