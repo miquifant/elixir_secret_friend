@@ -809,3 +809,50 @@ IO.puts("Loaded!! La lista es:")
 IO.inspect(SFList.show(:lista1))
 
 ```
+---
+Vamos a añadir un mensaje "lock" para hacer que a la lista no se puedan añadir más amigos.
+Necesitamos ampliar el estado.
+{lista, selección, bloqueado}
+El estado se está convirtiendo en un asquete. Lo convertimos en un mapa.
+%{sflist: lista, selection: seleccion, lock: bloqueado}
+```
+  def start_link(name) do
+    GenServer.start_link(__MODULE__, %{sflist:SFList.new(), selection: nil, lock: false}, name: name)
+  end
+```
+En los sitios donde tenía una tupla ahora hay que poner un diccionario, y ya los _unused podemos omitirlos.
+Hay una syntax para añadir elementos a una diccionario.
+%{diccionario | campo: nuevo_valor}
+```
+  @impl GenServer
+  def handle_cast({:add_friend, friend}, %{sflist: sflist} = state) do
+    new_sflist = SFList.add_friend(sflist, friend)
+    {:noreply, %{state | sflist: new_sflist, selection: nil}}
+  end
+
+  @impl GenServer
+  def handle_call(:create_selection, _from, %{sflist: sflist, selection: nil} = state) do
+    new_selection = SFList.create_selection(sflist)
+    {:reply, new_selection, %{state | selection: new_selection}}
+  end
+
+  @impl GenServer
+  def handle_call(:create_selection, _from, %{selection: selection} = state) do
+    {:reply, selection, state}
+  end
+
+  @impl GenServer
+  def handle_call(:show, _from, %{sflist: sflist} = state) do
+    {:reply, sflist, state}
+  end
+```
+
+Tras el refactor, debe seguir funcionando:
+```
+# SFList.new(:lista1)
+# |> SFList.add_friend("Ramón")
+# |> SFList.add_friend("Javi")
+# |> SFList.add_friend("Miqui")
+iex(1)> SFList.create_selection(:lista1)
+[["Javi", "Ramón"], ["Ramón", "Miqui"], ["Miqui", "Javi"]]
+```
