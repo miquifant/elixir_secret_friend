@@ -4,23 +4,32 @@ defmodule SecretFriend.Worker.SFWorker do
 
   # ahora esta funcion devuelve {:ok, pid}
   def start_link(name) do
-    GenServer.start_link(__MODULE__, %{sflist: SFList.new(), selection: nil, lock: false}, name: name)
+    GenServer.start_link(__MODULE__, name, name: name)
   end
 
   @impl GenServer
-  def init(state) do
-    {:ok, state}
+  def init(name) do
+    case :ets.lookup(:sflist_cache, name) do
+      [] ->
+        {:ok, %{name: name, sflist: SFList.new(), selection: nil, lock: false}}
+      [{^name, state}] ->
+        {:ok, state}
+    end
   end
 
   @impl GenServer
-  def handle_cast(:lock, state) do
-    {:noreply, %{state | lock: true}}
+  def handle_cast(:lock, %{name: name} = state) do
+    new_state = %{state | lock: true}
+    :ets.insert(:sflist_cache, {name, new_state})
+    {:noreply, %{new_state | lock: true}}
   end
 
   @impl GenServer
-  def handle_call(:create_selection, _from, %{sflist: sflist, selection: nil} = state) do
+  def handle_call(:create_selection, _from, %{name: name, sflist: sflist, selection: nil} = state) do
     new_selection = SFList.create_selection(sflist)
-    {:reply, new_selection, %{state | selection: new_selection}}
+    new_state = %{state | selection: new_selection}
+    :ets.insert(:sflist_cache, {name, new_state})
+    {:reply, new_selection, new_state}
   end
 
   @impl GenServer

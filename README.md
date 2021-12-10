@@ -1366,3 +1366,141 @@ iex(4)> Process.info(pid)
   suspending: []
 ]
 ```
+---
+Ahora vamos a intentar guardar el estado, de forma que luego en el init del proceso, en vez de decirle que empiece con nada, que consulte si existía un estado guardado asociado a ese nombre, lo recupere.
+---
+## Erlang Term Storage
+Almacena cualquier término, cualquier tipo de datos, incluido diccionarios, tuplas o lo que quieras.
+El estado de nuestro proceso lo meteremos en esa tabla.
+Probamos en iex: (ets es un módulo erlang sin capa elixir. Se pone en minúscula con dos puntos, en vez de mayúscula)
+```
+h :ets.new
+  @spec new(name, options) :: tid() | atom()
+```
+tid()  --> table ID
+atom() --> table name
+
+Al crear le pasamos el tipo y visibilidad.
+Tipo, por ejemplo es :set (elementos únicos). Visibilidad: :private, :protected, :public
+(protected es que el creador es el único que puede escribir, pero cualquiera puede leer)
+---
+```
+iex(5)> table = :ets.new(:prueba, [:set, :protected])
+#Reference<0.949495643.4124966914.191465>
+iex(6)> :ets.insert(table, {"foo", self()})  
+true
+iex(7)> :ets.lookup(table, "foo")
+[{"foo", #PID<0.148.0>}]
+iex(8)> :ets.lookup(table, "var")
+[]
+```
+También se puede hacer una tabla con nombre en vez de un (:named_table)
+---
+Cambios que hacesmo:
+1. que cuando arranque la app cree la tabla
+```
+    :ets.new(:sflist_cache, [:named_table, :set, :public])
+```
+2. Actualizar estado cuando se cree selección: (worker)
+Antes hay que añadir el name de la tabla en el init
+```
+  def start_link(name) do
+    GenServer.start_link(__MODULE__, name, name: name)
+  end
+
+  @impl GenServer
+  def init(name) do
+    {:ok, %{name: name, sflist: SFList.new(), selection: nil, lock: false}}
+  end
+  ...
+  @impl GenServer
+  def handle_call(:create_selection, _from, %{name: name, sflist: sflist, selection: nil} = state) do
+    new_selection = SFList.create_selection(sflist)
+    new_state = %{state | selection: new_selection}
+    :ets.insert(:sflist_cache, {name, new_state})
+    {:reply, new_selection, new_state}
+  end
+```
+3. Recuperar estado al arrancar
+```
+  @impl GenServer
+  def init(name) do
+    case :ets.lookup(:sflist_cache, name) do
+      [] ->
+        {:ok, %{name: name, sflist: SFList.new(), selection: nil, lock: false}}
+      [{^name, state}] ->
+        {:ok, state}
+    end
+  end
+```
+Explicación del gorrito: que use el valor de name
+```
+$ name = :luis
+$ [{name, state}] = [{:pepe, 5}]
+casa
+$ name
+:pepe
+(Me ha cambiado name!)
+
+$ name = :luis
+$ [{^name, state}] = [{:pepe, 5}]
+no casa! :)
+```
+Lo probamos:
+```
+iex(1)> SFList.show(:lista1)
+["Miqui", "Javi", "Ramón"]
+iex(2)> SFList.create_selection(:lista1)
+[["Ramón", "Javi"], ["Javi", "Miqui"], ["Miqui", "Ramón"]]
+iex(3)> SFList.create_selection(:lista1)
+[["Ramón", "Javi"], ["Javi", "Miqui"], ["Miqui", "Ramón"]]
+iex(4)> :ets.lookup(:sflist_cache, :lista1)
+[
+  lista1: %{
+    lock: false,
+    name: :lista1,
+    selection: [["Ramón", "Javi"], ["Javi", "Miqui"], ["Miqui", "Ramón"]],
+    sflist: ["Miqui", "Javi", "Ramón"]
+  }
+]
+iex(5)> Process.whereis(:lista1)
+#PID<0.149.0>
+iex(6)> Process.exit(v, :boom)
+true
+iex(7)> Process.whereis(:lista1)
+#PID<0.156.0>
+iex(8)> SFList.create_selection(:lista1)
+[["Ramón", "Javi"], ["Javi", "Miqui"], ["Miqui", "Ramón"]]
+iex(9)> 
+```
+Si añado un friend y mato el proceso, al volver, el nuevo friend no está porque no lo hemos grabado.
+Igual se puede añadir que guarde el estado de bloqueo.
+```
+  @impl GenServer
+  def handle_cast(:lock, %{name: name} = state) do
+    new_state = %{state | lock: true}
+    :ets.insert(:sflist_cache, {name, new_state})
+    {:noreply, %{new_state | lock: true}}
+  end
+```
+Vemos que también se guarda:
+```
+iex(1)> SFList.lock(:lista1)
+:ok
+iex(2)> Process.whereis(:lista1)
+#PID<0.166.0>
+iex(3)> Process.exit(v, :matamecamion)
+true
+iex(4)> SFList.lock?(:lista1)
+true
+iex(5)> :ets.lookup(:sflist_cache, :lista1)
+[
+  lista1: %{
+    lock: true,
+    name: :lista1,
+    selection: nil,
+    sflist: ["Miqui", "Javi", "Ramón"]
+  }
+]
+```
+Faltaría poder nombrar los procesos por namespaces, en un registry para que no colisionen las listas con otros procesos.
