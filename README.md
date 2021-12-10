@@ -1169,3 +1169,200 @@ $ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend rpc 'IO.inspect 1
 $ _build/dev/rel/elixir_secret_friend/bin/elixir_secret_friend rpc 'IO.inspect SecretFriend.API.SFList.show(:supervised)'
 []
 ```
+---
+Este trozo de código,...
+```
+  def create_selection(sflist) do
+    sflist
+    |> Enum.shuffle()
+    |> gen_pairs()
+  end
+
+  # Funcion privada que encapsula la parte de barajar,
+  # para poder pasarlo como leftover al chunk_every
+  defp gen_pairs(sflist), do: Enum.chunk_every(sflist, 2, 1, sflist)
+```
+...en elixir 12 se puede hacer ya pasándole una lambda usando then()
+---
+En nuestra app, habíamos hecho una implementación ideal para servicios singleton:
+```
+defmodule SecretFriend do
+  use Application
+
+  @impl Application
+  def start(_type, _args) do
+    children = [
+      {SecretFriend.Worker.SFWorker, :supervised}
+    ]
+    opts = [strategy: :one_for_one, name: SecretFriend.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+Para tener múltiples listas necesitamos un supervisor dinámico.
+Vamos a hacer un módulo `boundary` para que nuestra API no vuelva a hablar con los workers, sino con los supervisores.
+Dentro dell módulo un `SFListsSupervisor` con behavior `DynamicSupervisor`.
+```
+defmodule SecretFriend.Boundary.SFListsSupervisor do
+  use DynamicSupervisor
+  
+end
+```
+Eso requiere un start_link y un init.
+```
+defmodule SecretFriend.Boundary.SFListsSupervisor do
+  use DynamicSupervisor
+
+  def start_link(_args) do
+    # (module, initial_argument, options)
+    DynamicSupervisor.start_link(__MODULE__, nil, name: __MODULE__)
+  end
+
+  def init(nil) do
+    # one for one: las listas son independientes. Si falla una lista reinicio solo esa.
+    DynamicSupervisor.init(strategy: :one_for_one)
+  end
+end
+```
+Falta decirle cómo queremos añadir nuevos "hijos".
+```
+
+  def create_sflist(name) do
+    # child_spec: mapa id: worker, start: tupla con modulo, función arranque y argumentos.
+    # o, si el worker define el child_spec: child_spec: tupla con el módulo y los args del start_link
+    # { module, [arg1: val1, arg2: val2]} -> los corchetes se pueden quitar
+    child_spec = %{id: SFWorker, start: {SecretFriend.Worker.SFWorker, :start_link, [name]}}
+    DynamicSupervisor.start_child(__MODULE__, child_spec)
+  end
+```
+Probamos:
+```
+iex(1)> alias SecretFriend.Boundary.SFListsSupervisor
+SecretFriend.Boundary.SFListsSupervisor
+iex(2)> SFListsSupervisor.start_link(:ignore)
+{:ok, #PID<0.167.0>}
+```
+Vemos que devuelve un pid. Le añado procesos:
+```
+iex(3)> SFListsSupervisor.create_sflist(:navidad)
+{:ok, #PID<0.168.0>}
+iex(4)> SFListsSupervisor.create_sflist(:navidad)
+{:error, {:already_started, #PID<0.168.0>}}
+iex(5)> SFListsSupervisor.create_sflist(:reyes)  
+{:ok, #PID<0.171.0>}
+iex(6)> DynamicSupervisor.which_children(SF
+SFList               SFListsSupervisor    SFWorker             
+
+iex(6)> DynamicSupervisor.which_children(SFListsSupervisor)
+[
+  {:undefined, #PID<0.168.0>, :worker, [SecretFriend.Worker.SFWorker]},
+  {:undefined, #PID<0.171.0>, :worker, [SecretFriend.Worker.SFWorker]}
+]
+```
+Vemos que no puedo poner dos veces el mismo nombre.
+Si pruebo a matar una lista se reinicia.
+Pierde el estado, pero volvemos a tener la lista.
+Vamos a ver un ejemplo de cómo podríamos guardar el estado en una tabla, para recuperarlo cuando resucite un proceos muerto.
+En el ejemplo, no realista, haremos que cuando se cree una selección se guarde el estado, pero cuando añadamos una amigo no, de forma que el estado del servidor y el guardado no sean el mismo.
+En ese caso, si se muere un proceso puedo recuperar el último estado guardado. No sería el mismo que había al morir, pero es un estado coherente.
+Eso simula por ejemplo si el sistema pierde la capacidad de añadir nuevas personas, porque ppor ejemplo revienta, pero yo puedo seguir trabajando con la selección creada.
+
+---
+Primero vamos a cambiar nuestro API para que no hable con el worker sino con el bundary.
+Cambio
+```
+defmodule SecretFriend.API.SFList do
+  alias SecretFriend.Worker.SFWorker
+
+  def new(name) do
+    SFWorker.start_link(name)
+    name
+  end
+  ...
+end
+```
+por:
+```
+defmodule SecretFriend.API.SFList do
+  alias SecretFriend.Boundary.SFListsSupervisor
+
+  def new(name) do
+    SFListsSupervisor.create_sflist(name)
+    name
+  end
+  ...
+end
+```
+Y en la App:
+```
+ defmodule SecretFriend do
+  use Application
+
+  @impl Application
+  def start(_type, _args) do
+    children = [
+      {SecretFriend.Worker.SFWorker, :supervised}
+    ]
+    opts = [strategy: :one_for_one, name: SecretFriend.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+por
+```
+ defmodule SecretFriend do
+  use Application
+
+  @impl Application
+  def start(_type, _args) do
+    children = [
+      {SecretFriend.Boundary.SFListsSupervisor, :noargs}
+    ]
+    opts = [strategy: :one_for_one, name: SecretFriend.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+Hay un supervisor "estático" (el que defines sus hijos en tiempo de compilación) que es "singleton", que es el supervisor dinámico, al cual ya se pueden añadir hijos en tiempo de ejecución.
+Vemos que ha funcionado:
+```
+iex(1)> DynamicSupervisor.which_children(SecretFriend.Supervisor)
+[
+  {SecretFriend.Boundary.SFListsSupervisor, #PID<0.173.0>, :supervisor,
+   [SecretFriend.Boundary.SFListsSupervisor]} 
+]
+iex(2)> DynamicSupervisor.which_children(SecretFriend.Boundary.SFListsSupervisor)
+[{:undefined, #PID<0.175.0>, :worker, [SecretFriend.Worker.SFWorker]}]
+iex(3)> [{_, pid, _, _}] = v
+[{:undefined, #PID<0.175.0>, :worker, [SecretFriend.Worker.SFWorker]}]
+iex(4)> Process.info(pid)
+[
+  registered_name: :lista1,
+  current_function: {:gen_server, :loop, 7},
+  initial_call: {:proc_lib, :init_p, 5},
+  status: :waiting,
+  message_queue_len: 0,
+  links: [#PID<0.173.0>],
+  dictionary: [
+    "$ancestors": [SecretFriend.Boundary.SFListsSupervisor,
+     SecretFriend.Supervisor, #PID<0.171.0>],
+    "$initial_call": {SecretFriend.Worker.SFWorker, :init, 1}
+  ],
+  trap_exit: false,
+  error_handler: :error_handler,
+  priority: :normal,
+  group_leader: #PID<0.170.0>,
+  total_heap_size: 233,
+  heap_size: 233,
+  stack_size: 12,
+  reductions: 104,
+  garbage_collection: [
+    max_heap_size: %{error_logger: true, kill: true, size: 0},
+    min_bin_vheap_size: 46422,
+    min_heap_size: 233,
+    fullsweep_after: 65535,
+    minor_gcs: 0
+  ],
+  suspending: []
+]
+```

@@ -1,8 +1,8 @@
 defmodule SecretFriend.API.SFList do
-  alias SecretFriend.Worker.SFWorker
+  alias SecretFriend.Boundary.SFListsSupervisor
 
   def new(name) do
-    SFWorker.start_link(name)
+    SFListsSupervisor.create_sflist(name)
     name
   end
 

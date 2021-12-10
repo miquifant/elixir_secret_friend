@@ -4,7 +4,7 @@ defmodule SecretFriend do
   @impl Application
   def start(_type, _args) do
     children = [
-      {SecretFriend.Worker.SFWorker, :supervised}
+      {SecretFriend.Boundary.SFListsSupervisor, :noargs}
     ]
     opts = [strategy: :one_for_one, name: SecretFriend.Supervisor]
     Supervisor.start_link(children, opts)
